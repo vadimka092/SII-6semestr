@@ -1,0 +1,568 @@
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+import numpy as np
+import random
+import collections
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+# ---------------------- ПРАВИЛА ИТАЛЬЯНСКИХ ШАШЕК ----------------------
+class ItalianCheckers:
+    def __init__(self):
+        self.board = self.create_board()
+        self.current_player = 1  # 1 - белые, -1 - чёрные
+
+    def create_board(self):
+        board = np.full((8, 8), '', dtype=str)
+        # Расстановка шашек
+        for row in range(3):
+            for col in range(8):
+                if (row + col) % 2 == 1:
+                    board[row][col] = 'b'   # чёрные сверху
+        for row in range(5, 8):
+            for col in range(8):
+                if (row + col) % 2 == 1:
+                    board[row][col] = 'w'   # белые снизу
+        return board
+
+    def is_white(self, piece):
+        return piece in ('w', 'W')
+    def is_black(self, piece):
+        return piece in ('b', 'B')
+    def get_piece_color(self, piece):
+        if piece in ('w','W'): return 1
+        if piece in ('b','B'): return -1
+        return 0
+    def is_king(self, piece):
+        return piece in ('W','B')
+    def opponent(self, player):
+        return -player
+
+    def copy(self):
+        new_game = ItalianCheckers()
+        new_game.board = self.board.copy()
+        new_game.current_player = self.current_player
+        return new_game
+
+    def get_all_moves(self, player):
+        moves = []
+        direction = -1 if player == 1 else 1   # белые идут вверх
+        for r in range(8):
+            for c in range(8):
+                piece = self.board[r][c]
+                if piece and self.get_piece_color(piece) == player:
+                    if not self.is_king(piece):
+                        # ход на 1 клетку вперёд
+                        dr = direction
+                        for dc in (-1, 1):
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < 8 and 0 <= nc < 8 and self.board[nr][nc] == '':
+                                moves.append(((r,c), (nr,nc)))
+                        # взятие на 2 клетки
+                        dr = 2*direction
+                        for dc in (-2, 2):
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < 8 and 0 <= nc < 8:
+                                mr, mc = r + dr//2, c + dc//2
+                                if self.board[nr][nc] == '' and self.board[mr][mc] != '' and self.get_piece_color(self.board[mr][mc]) == self.opponent(player):
+                                    moves.append(((r,c), (nr,nc)))
+                    else:
+                        # Дамка: ход без взятия
+                        for dr in (-1,1):
+                            for dc in (-1,1):
+                                for step in range(1,8):
+                                    nr, nc = r + step*dr, c + step*dc
+                                    if not (0 <= nr < 8 and 0 <= nc < 8):
+                                        break
+                                    if self.board[nr][nc] == '':
+                                        moves.append(((r,c), (nr,nc)))
+                                    else:
+                                        break
+                        # Взятие дамкой
+                        for dr in (-1,1):
+                            for dc in (-1,1):
+                                for step in range(1,8):
+                                    nr, nc = r + step*dr, c + step*dc
+                                    if not (0 <= nr < 8 and 0 <= nc < 8):
+                                        break
+                                    if self.board[nr][nc] != '':
+                                        jump_r = nr + dr
+                                        jump_c = nc + dc
+                                        if 0 <= jump_r < 8 and 0 <= jump_c < 8 and self.board[jump_r][jump_c] == '' and self.get_piece_color(self.board[nr][nc]) == self.opponent(player):
+                                            moves.append(((r,c), (jump_r, jump_c)))
+                                        break
+        return moves
+
+    def make_move(self, move):
+        (r1,c1), (r2,c2) = move
+        piece = self.board[r1][c1]
+        self.board[r1][c1] = ''
+        # Если взятие
+        if abs(r2-r1) == 2 and abs(c2-c1) == 2:
+            mr, mc = (r1+r2)//2, (c1+c2)//2
+            self.board[mr][mc] = ''
+        elif abs(r2-r1) > 1:   # дамка бьёт на расстоянии >1
+            dr = 1 if r2>r1 else -1
+            dc = 1 if c2>c1 else -1
+            rr, cc = r1+dr, c1+dc
+            while (rr, cc) != (r2,c2):
+                if self.board[rr][cc] != '':
+                    self.board[rr][cc] = ''
+                rr += dr
+                cc += dc
+        self.board[r2][c2] = piece
+        # Превращение в дамку
+        if piece == 'w' and r2 == 0:
+            self.board[r2][c2] = 'W'
+        elif piece == 'b' and r2 == 7:
+            self.board[r2][c2] = 'B'
+        self.current_player = self.opponent(self.current_player)
+
+    def is_game_over(self):
+        w_count = sum(1 for row in self.board for cell in row if cell in ('w','W'))
+        b_count = sum(1 for row in self.board for cell in row if cell in ('b','B'))
+        if w_count == 0 or b_count == 0:
+            return True
+        if len(self.get_all_moves(self.current_player)) == 0:
+            return True
+        return False
+
+    def get_winner(self):
+        w_count = sum(1 for row in self.board for cell in row if cell in ('w','W'))
+        b_count = sum(1 for row in self.board for cell in row if cell in ('b','B'))
+        if w_count == 0: return -1
+        if b_count == 0: return 1
+        if len(self.get_all_moves(self.current_player)) == 0:
+            return self.opponent(self.current_player)
+        return None
+
+# ---------------------- ВИЗУАЛИЗАЦИЯ (ТОЛЬКО ОВАЛЫ, БЕЗ КАРТИНОК) ----------------------
+class CheckersGUI:
+    def __init__(self, player1, player2, player1_name="Игрок 1", player2_name="Игрок 2"):
+        self.root = tk.Tk()
+        self.root.title(f"Итальянские шашки: {player1_name} vs {player2_name}")
+        self.game = ItalianCheckers()
+        self.player1 = player1
+        self.player2 = player2
+        self.current_agent = player1
+        self.canvas = tk.Canvas(self.root, width=400, height=400)
+        self.canvas.pack()
+        self.draw_board()
+        self.draw_pieces()
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.selected = None
+        if self.current_agent != "human":
+            self.root.after(500, self.ai_move)
+
+    def draw_board(self):
+        self.canvas.delete("all")
+        for row in range(8):
+            for col in range(8):
+                color = "white" if (row+col)%2==0 else "gray"
+                self.canvas.create_rectangle(col*50, row*50, (col+1)*50, (row+1)*50, fill=color)
+
+    def draw_pieces(self):
+        for row in range(8):
+            for col in range(8):
+                piece = self.game.board[row][col]
+                if piece:
+                    x, y = col*50+5, row*50+5
+                    color = "white" if piece in ('w','W') else "black"
+                    # для дамок добавим корону (красный кружок сверху)
+                    if piece in ('W','B'):
+                        self.canvas.create_oval(x, y, x+40, y+40, fill=color, outline='gold', width=2)
+                        self.canvas.create_text(x+20, y+20, text="♔", font=("Arial", 20), fill="gold")
+                    else:
+                        self.canvas.create_oval(x, y, x+40, y+40, fill=color, outline='gray', width=1)
+
+    def on_click(self, event):
+        if self.current_agent != "human":
+            return
+        col, row = event.x//50, event.y//50
+        if self.selected is None:
+            piece = self.game.board[row][col]
+            if piece and ((piece in ('w','W') and self.game.current_player==1) or (piece in ('b','B') and self.game.current_player==-1)):
+                self.selected = (row, col)
+                self.draw_board()
+                self.draw_pieces()
+                self.canvas.create_rectangle(col*50, row*50, (col+1)*50, (row+1)*50, outline='red', width=3)
+        else:
+            from_pos = self.selected
+            to_pos = (row, col)
+            moves = self.game.get_all_moves(self.game.current_player)
+            if (from_pos, to_pos) in moves:
+                self.game.make_move((from_pos, to_pos))
+                self.selected = None
+                self.draw_board()
+                self.draw_pieces()
+                if self.game.is_game_over():
+                    winner = self.game.get_winner()
+                    messagebox.showinfo("Game Over", f"Победил {'белые' if winner==1 else 'чёрные'}!")
+                    self.root.quit()
+                    return
+                self.current_agent = self.player2
+                if self.current_agent != "human":
+                    self.root.after(100, self.ai_move)
+            else:
+                self.selected = None
+                self.draw_board()
+                self.draw_pieces()
+
+    def ai_move(self):
+        if self.current_agent == "human":
+            return
+        legal_moves = self.game.get_all_moves(self.game.current_player)
+        if not legal_moves:
+            messagebox.showinfo("Game Over", "Нет ходов, игра окончена!")
+            self.root.quit()
+            return
+        move = self.current_agent.get_move(self.game, legal_moves)
+        if move:
+            self.game.make_move(move)
+            self.draw_board()
+            self.draw_pieces()
+            if self.game.is_game_over():
+                winner = self.game.get_winner()
+                messagebox.showinfo("Game Over", f"Победил {'белые' if winner==1 else 'чёрные'}!")
+                self.root.quit()
+                return
+            self.current_agent = self.player1 if self.current_agent == self.player2 else self.player2
+            if self.current_agent != "human":
+                self.root.after(100, self.ai_move)
+
+    def run(self):
+        self.root.mainloop()
+
+# ---------------------- МИНИМАКС БОТ ----------------------
+class MinimaxBot:
+    def __init__(self, color, depth=2, noise=0.1):
+        self.color = color
+        self.depth = depth
+        self.noise = noise
+
+    def evaluate_board(self, game):
+        score = 0
+        for row in game.board:
+            for cell in row:
+                if cell == 'w': score += 1
+                elif cell == 'b': score -= 1
+                elif cell == 'W': score += 3
+                elif cell == 'B': score -= 3
+        return score if self.color == 1 else -score
+
+    def minimax(self, game, depth, alpha, beta, maximizing):
+        if depth == 0 or game.is_game_over():
+            return self.evaluate_board(game), None
+        moves = game.get_all_moves(game.current_player)
+        if not moves:
+            return self.evaluate_board(game), None
+        best_move = None
+        if maximizing:
+            best_val = -np.inf
+            for move in moves:
+                new_game = game.copy()
+                new_game.make_move(move)
+                val, _ = self.minimax(new_game, depth-1, alpha, beta, False)
+                if val > best_val:
+                    best_val = val
+                    best_move = move
+                alpha = max(alpha, val)
+                if beta <= alpha:
+                    break
+            return best_val, best_move
+        else:
+            best_val = np.inf
+            for move in moves:
+                new_game = game.copy()
+                new_game.make_move(move)
+                val, _ = self.minimax(new_game, depth-1, alpha, beta, True)
+                if val < best_val:
+                    best_val = val
+                    best_move = move
+                beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return best_val, best_move
+
+    def get_move(self, game, legal_moves=None):
+        if random.random() < self.noise:
+            moves = game.get_all_moves(self.color)
+            if moves:
+                return random.choice(moves)
+        _, move = self.minimax(game, self.depth, -np.inf, np.inf, True)
+        return move
+
+# ---------------------- DQN АГЕНТ (PyTorch) ----------------------
+class DQNNetwork(nn.Module):
+    def __init__(self, input_channels=4, action_size=4096):
+        super().__init__()
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(64*8*8, 512)
+        self.fc2 = nn.Linear(512, action_size)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.reshape(x.size(0), -1)   # вместо .view() – работает всегда
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+class DQNAgent:
+    def __init__(self, color, learning_rate=0.001, gamma=0.998, epsilon=1.0, epsilon_min=0.05, epsilon_decay=0.999, batch_size=128, memory_size=20000):
+        self.color = color
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.memory = collections.deque(maxlen=memory_size)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy_net = DQNNetwork(input_channels=4).to(self.device)
+        self.target_net = DQNNetwork(input_channels=4).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
+
+    def update_target_network(self):
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def get_state(self, game):
+        state = np.zeros((8,8,4), dtype=np.float32)
+        for r in range(8):
+            for c in range(8):
+                p = game.board[r][c]
+                if p:
+                    if self.color == 1:  # белые
+                        if p == 'w': state[r,c,0] = 1
+                        elif p == 'W': state[r,c,1] = 1
+                        elif p == 'b': state[r,c,2] = 1
+                        elif p == 'B': state[r,c,3] = 1
+                    else:  # чёрные
+                        if p == 'b': state[r,c,0] = 1
+                        elif p == 'B': state[r,c,1] = 1
+                        elif p == 'w': state[r,c,2] = 1
+                        elif p == 'W': state[r,c,3] = 1
+        return state
+
+    def act(self, game, legal_moves):
+        if random.random() < self.epsilon:
+            return random.choice(legal_moves)
+        state = self.get_state(game)
+        state_t = torch.FloatTensor(state).unsqueeze(0).permute(0,3,1,2).contiguous().to(self.device)
+        with torch.no_grad():
+            q_vals = self.policy_net(state_t).cpu().numpy()[0]
+        best_move = None
+        best_q = -np.inf
+        for move in legal_moves:
+            idx = (move[0][0]*8 + move[0][1])*64 + (move[1][0]*8 + move[1][1])
+            if idx < len(q_vals):
+                if q_vals[idx] > best_q:
+                    best_q = q_vals[idx]
+                    best_move = move
+        if best_move is None:
+            return random.choice(legal_moves)
+        return best_move
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def replay(self):
+        if len(self.memory) < self.batch_size:
+            return
+        batch = random.sample(self.memory, self.batch_size)
+        states = np.array([s for s,_,_,_,_ in batch])
+        actions = []
+        rewards = []
+        next_states = np.array([ns for _,_,_,ns,_ in batch])
+        dones = []
+        for (_, a, r, _, d) in batch:
+            idx = (a[0][0]*8 + a[0][1])*64 + (a[1][0]*8 + a[1][1])
+            actions.append(idx)
+            rewards.append(r)
+            dones.append(d)
+        states_t = torch.FloatTensor(states).permute(0,3,1,2).contiguous().to(self.device)
+        next_states_t = torch.FloatTensor(next_states).permute(0,3,1,2).contiguous().to(self.device)
+        actions_t = torch.LongTensor(actions).to(self.device)
+        rewards_t = torch.FloatTensor(rewards).to(self.device)
+        dones_t = torch.BoolTensor(dones).to(self.device)
+
+        current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
+        with torch.no_grad():
+            next_q = self.target_net(next_states_t).max(1)[0]
+            target_q = rewards_t + (self.gamma * next_q * (~dones_t))
+        loss = F.mse_loss(current_q, target_q)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def get_move(self, game, legal_moves):
+        return self.act(game, legal_moves)
+## Рандом бот
+class RandomBot:
+    def __init__(self, color):
+        self.color = color
+    def get_move(self, game, legal_moves):
+        moves = game.get_all_moves(self.color)
+        if moves:
+            return random.choice(moves)
+        return None
+# ---------------------- ОБУЧЕНИЕ DQN ----------------------
+def train_dqn(episodes=500, minimax_depth=2, minimax_noise=0):
+    dqn = DQNAgent(
+        color=1,
+        epsilon_decay=0.999,       # медленное падение
+        batch_size=128,
+        memory_size=20000,
+        learning_rate=0.001
+    )
+    minimax = MinimaxBot(color=-1, depth=minimax_depth, noise=minimax_noise)
+    wins_dqn = 0
+    for ep in range(episodes):
+        game = ItalianCheckers()
+        game.current_player = 1
+        state = dqn.get_state(game)
+        done = False
+        while not done:
+            if game.current_player == 1:
+                legal = game.get_all_moves(1)
+                if not legal:
+                    break
+                move = dqn.act(game, legal)
+                game.make_move(move)
+                reward = 0
+                next_state = dqn.get_state(game)
+                if game.is_game_over():
+                    winner = game.get_winner()
+                    if winner == 1:
+                        reward = 100        # КЛЮЧЕВОЕ: большая награда
+                        wins_dqn += 1
+                    else:
+                        reward = -100
+                    done = True
+                else:
+                    reward = 0.2
+                dqn.remember(state, move, reward, next_state, done)
+                state = next_state
+                if not done:
+                    dqn.replay()
+            else:
+                legal = game.get_all_moves(-1)
+                if not legal:
+                    break
+                move = minimax.get_move(game, legal)
+                game.make_move(move)
+                if game.is_game_over():
+                    done = True
+        if (ep+1) % 100 == 0:
+            print(f"Episode {ep+1}/{episodes}, wins (DQN): {wins_dqn}, epsilon: {dqn.epsilon:.3f}")
+        dqn.update_target_network()
+    print(f"Обучение завершено. DQN выиграл {wins_dqn} из {episodes} партий.")
+    return dqn
+
+def play_match(dqn, minimax, num_games=50):
+    wins_dqn = 0
+    for _ in range(num_games):
+        game = ItalianCheckers()
+        game.current_player = 1
+        while not game.is_game_over():
+            if game.current_player == 1:
+                legal = game.get_all_moves(1)
+                if not legal:
+                    break
+                move = dqn.act(game, legal)
+                game.make_move(move)
+            else:
+                legal = game.get_all_moves(-1)
+                if not legal:
+                    break
+                move = minimax.get_move(game, legal)
+                game.make_move(move)
+        winner = game.get_winner()
+        if winner == 1:
+            wins_dqn += 1
+    print(f"Матч: DQN выиграл {wins_dqn} из {num_games} партий (победа в {wins_dqn/num_games*100:.1f}%)")
+
+# ---------------------- ГЛАВНОЕ ОКНО РЕГИСТРАЦИИ ----------------------
+def register_user():
+    username = simpledialog.askstring("Регистрация", "Введите логин:")
+    password = simpledialog.askstring("Регистрация", "Введите пароль:", show='')
+    if username and password:
+        with open("registered_users.txt", "a") as f:
+            f.write(f"{username}:{password}\n")
+        messagebox.showinfo("Регистрация", "Регистрация прошла успешно!")
+        launch_game(username)
+
+def login_user():
+    username = simpledialog.askstring("Вход", "Введите логин:")
+    password = simpledialog.askstring("Вход", "Введите пароль:", show='')
+    if username and password:
+        try:
+            with open("registered_users.txt", "r") as f:
+                users = f.readlines()
+                for user in users:
+                    saved_user, saved_pass = user.strip().split(':')
+                    if saved_user == username and saved_pass == password:
+                        messagebox.showinfo("Вход", "Вход выполнен!")
+                        launch_game(username)
+                        return
+        except FileNotFoundError:
+            pass
+    messagebox.showerror("Ошибка", "Неправильный логин или пароль!")
+
+def launch_game(player_name):
+    # закрываем главное окно регистрации, чтобы не было конфликтов
+    root.destroy()
+    choice = simpledialog.askstring("Выбор режима",
+        "1 - Играть против Минимакс\n2 - Играть против DQN (обученного)\n3 - Обучить DQN\n4 - Матч DQN vs Минимакс")
+    if choice == '1':
+        bot = MinimaxBot(color=-1, depth=2, noise=0)
+        gui = CheckersGUI("human", bot, player_name, "Minimax Bot")
+        gui.run()
+    elif choice == '2':
+        dqn = DQNAgent(color=-1)
+        try:
+            dqn.policy_net.load_state_dict(torch.load("dqn_checkers.pt", map_location=torch.device('cpu')))
+            dqn.target_net.load_state_dict(dqn.policy_net.state_dict())
+            dqn.epsilon = 0.0
+        except:
+            messagebox.showerror("Ошибка", "Модель не найдена. Сначала выполните обучение (пункт 3).")
+            return
+        gui = CheckersGUI("human", dqn, player_name, "DQN Bot")
+        gui.run()
+    elif choice == '3':
+        messagebox.showinfo("Обучение", "Обучение DQN (белые) против Минимакса (чёрные). Может занять несколько минут.")
+        dqn = train_dqn(episodes=500, minimax_depth=2, minimax_noise=0)
+        torch.save(dqn.policy_net.state_dict(), "dqn_checkers.pt")
+        messagebox.showinfo("Обучение", "Модель сохранена в dqn_checkers.pt")
+        # после обучения можно сразу запустить игру? Предложим
+        launch_game(player_name)  # рекурсивно вернёмся в меню
+    elif choice == '4':
+        dqn = DQNAgent(color=1)
+        try:
+            dqn.policy_net.load_state_dict(torch.load("dqn_checkers.pt", map_location=torch.device('cpu')))
+            dqn.target_net.load_state_dict(dqn.policy_net.state_dict())
+            dqn.epsilon = 0.0
+        except:
+            messagebox.showerror("Ошибка", "Модель не найдена. Сначала выполните обучение (пункт 3).")
+            return
+        minimax = MinimaxBot(color=-1, depth=2, noise=0)
+        play_match(dqn, minimax, num_games=100)
+        messagebox.showinfo("Матч завершён", "Результаты выведены в консоль.")
+    else:
+        messagebox.showerror("Ошибка", "Неверный выбор")
+
+# Запуск приложения
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.title("Регистрация игрока")
+    tk.Label(root, text="Регистрация/Вход игрока").pack()
+    tk.Button(root, text="Регистрация", command=register_user).pack()
+    tk.Button(root, text="Вход", command=login_user).pack()
+    root.mainloop()
