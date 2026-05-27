@@ -1,0 +1,352 @@
+import random
+import math
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+# ----- 1. Генерация 15 случайных городов -----
+cities = []
+for i in range(15):
+    cities.append({
+        'id': i,
+        'name': f'Город_{i+1}',
+        'x': random.randint(0, 100),
+        'y': random.randint(0, 100)
+    })
+
+print("Сгенерированные города:")
+for c in cities:
+    print(f"  {c['name']}: ({c['x']}, {c['y']})")
+print()
+
+# ----- 2. Общие вспомогательные функции -----
+def distance(city1, city2):
+    return math.hypot(city1['x'] - city2['x'], city1['y'] - city2['y'])
+
+def compute_wcss(clusters, centroids_coords):
+    """WCSS = сумма квадратов расстояний от точек до центроидов"""
+    wcss = 0.0
+    for i, cluster in enumerate(clusters):
+        cx, cy = centroids_coords[i]
+        for city in cluster:
+            wcss += (city['x'] - cx)**2 + (city['y'] - cy)**2
+    return wcss
+
+# ----- 3. Алгоритмический метод (жадный) -----
+def algorithmic_clustering(cities, k):
+    """Возвращает clusters (список списков городов), centroids_coords, wcss"""
+    n = len(cities)
+    if k >= n:
+        clusters = [[city] for city in cities]
+        centroids = [(city['x'], city['y']) for city in cities]
+        return clusters, centroids, 0.0
+
+    # матрица расстояний
+    dist_mat = [[0.0]*n for _ in range(n)]
+    for i in range(n):
+        for j in range(i+1, n):
+            d = distance(cities[i], cities[j])
+            dist_mat[i][j] = dist_mat[j][i] = d
+
+    # 1) первый центр – город с минимальной суммой расстояний
+    sum_dist = [sum(dist_mat[i]) for i in range(n)]
+    first_idx = sum_dist.index(min(sum_dist))
+    centers_idx = [first_idx]
+
+    # 2) жадный выбор остальных центров (максимизация минимального расстояния)
+    while len(centers_idx) < k:
+        best_idx = -1
+        max_min = -1.0
+        for i in range(n):
+            if i in centers_idx:
+                continue
+            min_d = min(dist_mat[i][j] for j in centers_idx)
+            if min_d > max_min:
+                max_min = min_d
+                best_idx = i
+        if best_idx == -1:
+            break
+        centers_idx.append(best_idx)
+
+    # координаты центров
+    centroids = [(cities[idx]['x'], cities[idx]['y']) for idx in centers_idx]
+
+    # распределение городов по ближайшему центру
+    clusters = [[] for _ in range(k)]
+    for i, city in enumerate(cities):
+        if i in centers_idx:
+            pos = centers_idx.index(i)
+            clusters[pos].append(city)
+        else:
+            best = 0
+            best_dist = float('inf')
+            for ci, (cx, cy) in enumerate(centroids):
+                d = math.hypot(city['x'] - cx, city['y'] - cy)
+                if d < best_dist:
+                    best_dist = d
+                    best = ci
+            clusters[best].append(city)
+
+    wcss = compute_wcss(clusters, centroids)
+    return clusters, centroids, wcss
+
+def find_optimal_k_algorithmic(cities, max_k=5):
+    """Поиск оптимального K для алгоритмического метода методом локтя"""
+    wcss_vals = []
+    for k in range(1, max_k+1):
+        _, _, wcss = algorithmic_clustering(cities, k)
+        wcss_vals.append(wcss)
+    # классический поиск излома (максимальное расстояние до прямой от 1 до max_k)
+    if max_k < 3:
+        return 1
+    x1, y1 = 1, wcss_vals[0]
+    x2, y2 = max_k, wcss_vals[-1]
+    max_dist = -1.0
+    best_k = 1
+    for k in range(1, max_k+1):
+        y = wcss_vals[k-1]
+        num = abs((x2-x1)*(y1-y) - (x1-k)*(y2-y1))
+        den = math.hypot(x2-x1, y2-y1)
+        dist = num / den if den != 0 else 0
+        if dist > max_dist:
+            max_dist = dist
+            best_k = k
+    return best_k
+
+# ----- 4. Ручной K‑средних -----
+def kmeans_manual(cities, k, max_iter=20):
+    """Ручная реализация K‑средних"""
+    n = len(cities)
+    # случайные начальные центроиды (разные города)
+    init = random.sample(cities, k)
+    centroids = [(c['x'], c['y']) for c in init]
+
+    for _ in range(max_iter):
+        clusters = [[] for _ in range(k)]
+        for city in cities:
+            dists = [math.hypot(city['x']-cx, city['y']-cy) for (cx, cy) in centroids]
+            best = dists.index(min(dists))
+            clusters[best].append(city)
+
+        new_centroids = []
+        for cluster in clusters:
+            if cluster:
+                avg_x = sum(c['x'] for c in cluster)/len(cluster)
+                avg_y = sum(c['y'] for c in cluster)/len(cluster)
+                new_centroids.append((avg_x, avg_y))
+            else:
+                new_centroids.append((0.0, 0.0))
+
+        # проверка сходимости
+        if all(abs(new_centroids[i][0]-centroids[i][0])<1e-5 and
+               abs(new_centroids[i][1]-centroids[i][1])<1e-5 for i in range(k)):
+            break
+        centroids = new_centroids
+
+    # финальное распределение
+    final_clusters = [[] for _ in range(k)]
+    for city in cities:
+        dists = [math.hypot(city['x']-cx, city['y']-cy) for (cx, cy) in centroids]
+        best = dists.index(min(dists))
+        final_clusters[best].append(city)
+
+    wcss = compute_wcss(final_clusters, centroids)
+    return final_clusters, centroids, wcss
+
+def find_optimal_k_kmeans_manual(cities, max_k=5, max_iter=20):
+    """Поиск оптимального K для ручного K‑средних методом локтя"""
+    wcss_vals = []
+    for k in range(1, max_k+1):
+        _, _, wcss = kmeans_manual(cities, k, max_iter)
+        wcss_vals.append(wcss)
+    if max_k < 3:
+        return 1
+    x1, y1 = 1, wcss_vals[0]
+    x2, y2 = max_k, wcss_vals[-1]
+    max_dist = -1.0
+    best_k = 1
+    for k in range(1, max_k+1):
+        y = wcss_vals[k-1]
+        num = abs((x2-x1)*(y1-y) - (x1-k)*(y2-y1))
+        den = math.hypot(x2-x1, y2-y1)
+        dist = num / den if den != 0 else 0
+        if dist > max_dist:
+            max_dist = dist
+            best_k = k
+    return best_k
+
+# ----- 5. Библиотечный K‑средних (sklearn) -----
+def kmeans_sklearn_fixed(cities, k):
+    X = np.array([[c['x'], c['y']] for c in cities])
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X)
+    labels = km.labels_
+    clusters = [[] for _ in range(k)]
+    for i, c in enumerate(cities):
+        clusters[labels[i]].append(c)
+    return clusters, km.cluster_centers_, km.inertia_
+
+def find_optimal_k_kmeans_sklearn(cities, max_k=5):
+    X = np.array([[c['x'], c['y']] for c in cities])
+    wcss_vals = []
+    for k in range(1, max_k+1):
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(X)
+        wcss_vals.append(km.inertia_)
+    if max_k < 3:
+        return 1
+    x1, y1 = 1, wcss_vals[0]
+    x2, y2 = max_k, wcss_vals[-1]
+    max_dist = -1.0
+    best_k = 1
+    for k in range(1, max_k+1):
+        y = wcss_vals[k-1]
+        num = abs((x2-x1)*(y1-y) - (x1-k)*(y2-y1))
+        den = math.hypot(x2-x1, y2-y1)
+        dist = num / den if den != 0 else 0
+        if dist > max_dist:
+            max_dist = dist
+            best_k = k
+    return best_k
+
+# ----- 6. Вычисление метрик -----
+def avg_distance_to_centroid(cities, clusters, centroids_coords):
+    total = 0.0
+    count = 0
+    for i, cluster in enumerate(clusters):
+        cx, cy = centroids_coords[i]
+        for city in cluster:
+            total += math.hypot(city['x']-cx, city['y']-cy)
+            count += 1
+    return total / count if count > 0 else 0.0
+
+# ----- 7. Основная программа -----
+MAX_K = 5   # ограничение
+
+# Алгоритмический метод
+print("="*60)
+print("АЛГОРИТМИЧЕСКИЙ МЕТОД")
+optimal_alg = find_optimal_k_algorithmic(cities, max_k=MAX_K)
+print(f"Оптимальное K = {optimal_alg}")
+start = time.perf_counter()
+clusters_alg, centroids_alg, wcss_alg = algorithmic_clustering(cities, optimal_alg)
+t_alg = time.perf_counter() - start
+avg_alg = avg_distance_to_centroid(cities, clusters_alg, centroids_alg)
+# силуэт для алгоритмического метода (присваиваем метки)
+labels_alg = []
+for i, city in enumerate(cities):
+    for ci, cluster in enumerate(clusters_alg):
+        if city in cluster:
+            labels_alg.append(ci)
+            break
+X_data = np.array([[c['x'], c['y']] for c in cities])
+if len(set(labels_alg)) > 1:
+    sil_alg = silhouette_score(X_data, labels_alg)
+else:
+    sil_alg = -1.0
+
+print(f"Время: {t_alg:.6f} сек")
+print(f"WCSS: {wcss_alg:.2f}")
+print(f"Среднее расстояние до центроида: {avg_alg:.4f}")
+print(f"Силуэт: {sil_alg:.4f}")
+print()
+
+# Ручной K‑средних
+print("="*60)
+print("РУЧНОЙ K‑СРЕДНИХ (собственная реализация)")
+optimal_own = find_optimal_k_kmeans_manual(cities, max_k=MAX_K)
+print(f"Оптимальное K = {optimal_own}")
+start = time.perf_counter()
+clusters_own, centroids_own, wcss_own = kmeans_manual(cities, optimal_own)
+t_own = time.perf_counter() - start
+avg_own = avg_distance_to_centroid(cities, clusters_own, centroids_own)
+# метки для силуэта
+labels_own = []
+for i, city in enumerate(cities):
+    for ci, cluster in enumerate(clusters_own):
+        if city in cluster:
+            labels_own.append(ci)
+            break
+if len(set(labels_own)) > 1:
+    sil_own = silhouette_score(X_data, labels_own)
+else:
+    sil_own = -1.0
+
+print(f"Время: {t_own:.6f} сек")
+print(f"WCSS: {wcss_own:.2f}")
+print(f"Среднее расстояние до центроида: {avg_own:.4f}")
+print(f"Силуэт: {sil_own:.4f}")
+print()
+
+# Библиотечный K‑средних
+print("="*60)
+print("БИБЛИОТЕЧНЫЙ K‑СРЕДНИХ (sklearn)")
+optimal_sk = find_optimal_k_kmeans_sklearn(cities, max_k=MAX_K)
+print(f"Оптимальное K = {optimal_sk}")
+start = time.perf_counter()
+clusters_sk, centroids_sk, wcss_sk = kmeans_sklearn_fixed(cities, optimal_sk)
+t_sk = time.perf_counter() - start
+avg_sk = avg_distance_to_centroid(cities, clusters_sk, centroids_sk)
+# метки уже есть в процессе, посчитаем силуэт
+if optimal_sk > 1:
+    X = np.array([[c['x'], c['y']] for c in cities])
+    km_temp = KMeans(n_clusters=optimal_sk, random_state=42, n_init=10)
+    labels_sk = km_temp.fit_predict(X)
+    sil_sk = silhouette_score(X, labels_sk)
+else:
+    sil_sk = -1.0
+
+print(f"Время: {t_sk:.6f} сек")
+print(f"WCSS: {wcss_sk:.2f}")
+print(f"Среднее расстояние до центроида: {avg_sk:.4f}")
+print(f"Силуэт: {sil_sk:.4f}")
+print("="*60)
+
+# ----- 8. Визуализация (три графика) -----
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+
+# Алгоритмический метод
+for i, cluster in enumerate(clusters_alg):
+    xs = [c['x'] for c in cluster]
+    ys = [c['y'] for c in cluster]
+    axes[0].scatter(xs, ys, c=colors[i % len(colors)], label=f'Кл.{i+1}', alpha=0.7)
+axes[0].scatter([c[0] for c in centroids_alg], [c[1] for c in centroids_alg],
+                c='black', marker='X', s=200, edgecolors='white', linewidth=2)
+axes[0].set_title(f'Алгоритмический (K={optimal_alg})')
+axes[0].set_xlabel('X'); axes[0].set_ylabel('Y')
+axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+# Ручной K‑средних
+for i, cluster in enumerate(clusters_own):
+    xs = [c['x'] for c in cluster]
+    ys = [c['y'] for c in cluster]
+    axes[1].scatter(xs, ys, c=colors[i % len(colors)], label=f'Кл.{i+1}', alpha=0.7)
+axes[1].scatter([c[0] for c in centroids_own], [c[1] for c in centroids_own],
+                c='black', marker='X', s=200, edgecolors='white', linewidth=2)
+axes[1].set_title(f'Ручной K‑средних (K={optimal_own})')
+axes[1].set_xlabel('X'); axes[1].set_ylabel('Y')
+axes[1].legend(); axes[1].grid(True, alpha=0.3)
+
+# Библиотечный K‑средних
+for i, cluster in enumerate(clusters_sk):
+    xs = [c['x'] for c in cluster]
+    ys = [c['y'] for c in cluster]
+    axes[2].scatter(xs, ys, c=colors[i % len(colors)], label=f'Кл.{i+1}', alpha=0.7)
+axes[2].scatter([c[0] for c in centroids_sk], [c[1] for c in centroids_sk],
+                c='black', marker='X', s=200, edgecolors='white', linewidth=2)
+axes[2].set_title(f'Библиотечный K‑средних (K={optimal_sk})')
+axes[2].set_xlabel('X'); axes[2].set_ylabel('Y')
+axes[2].legend(); axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+ Построение матрицы попарных расстояний
+python
+dist_mat = [[0.0]*n for _ in range(n)]
+for i in range(n):
+    for j in range(i+1, n):
+        d = distance(cities[i], cities[j])
+        dist_mat[i][j] = dist_mat[j][i] = d
